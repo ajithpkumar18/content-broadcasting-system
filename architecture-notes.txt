@@ -1,0 +1,152 @@
+CONTENT BROADCASTING SYSTEM — ARCHITECTURE NOTES
+=================================================
+
+1. AUTHENTICATION & RBAC FLOW
+------------------------------
+- All protected routes use JWT-based authentication via authMiddleware.
+- On login, the server signs a JWT containing { id, role } using a secret key.
+- authMiddleware extracts the token from the Authorization header (supports
+  both "Bearer <token>" and raw token), verifies it, and attaches decoded
+  user to req.user.
+- roleMiddleware(role) checks req.user.role against the required role.
+  Returns 403 if mismatch. This strictly separates PRINCIPAL and TEACHER access.
+
+  Protected routes:
+    TEACHER  → POST /upload, GET /my-uploads
+    PRINCIPAL → GET /all, GET /pending, POST /:id/approve, POST /:id/reject
+    PUBLIC   → GET /live/:teacherId (no auth)
+
+
+2. SUBJECT-BASED SYSTEM DESIGN
+--------------------------------
+- ContentSlot acts as the "broadcast channel" for each subject.
+- One slot exists per subject (enforced by @unique on subject).
+- Multiple content items belong to one slot via ContentSchedule.
+- This design means Maths has its own rotation, Science has its own, etc.
+- Subjects are case-sensitive strings; no enum constraint to allow flexibility.
+
+
+3. UPLOAD HANDLING
+-------------------
+- Multer middleware handles multipart/form-data.
+- File filter allows only image/jpeg, image/png, image/gif.
+- File size limit: 10MB enforced at middleware level.
+- Files saved to /uploads directory with timestamp-prefixed filename.
+- File path stored as /uploads/<filename> in Content.fileUrl.
+- On upload, a ContentSlot is upserted for the subject, then a
+  ContentSchedule entry is created with the next rotationOrder for
+  that teacher+slot combination.
+
+
+4. APPROVAL WORKFLOW DESIGN
+-----------------------------
+  uploaded → PENDING → APPROVED or REJECTED
+
+- On upload, content status defaults to PENDING.
+- Only PRINCIPAL can approve or reject (enforced by roleMiddleware).
+- Rejection requires a reason (validated in service layer).
+- Rejection reason is stored in Content.rejectionReason.
+- approvedById and approvedAt are set on both approve and reject actions
+  to track who actioned it and when.
+- Only APPROVED content is ever returned by the public /live endpoint.
+
+
+5. SCHEDULING / ROTATION LOGIC (MOST IMPORTANT)
+-------------------------------------------------
+The system determines "what's live right now" dynamically — no cron jobs,
+no stored state, no background workers. It is computed on every request.
+
+Step-by-step for GET /live/:teacherId:
+
+  1. Fetch all content where:
+       - uploadedById = teacherId
+       - status = APPROVED
+       - startTime <= now <= endTime
+       - has a ContentSchedule entry
+
+  2. Group by subject using ContentSchedule → ContentSlot.subject
+
+  3. For each subject group, sort items by rotationOrder (ascending).
+
+  4. Run calculateActiveContent(items, now):
+
+       a. Compute totalCycleMs = sum of all durations in minutes * 60000
+       b. epoch = earliest startTime among items in the group (in ms)
+       c. elapsedInCycle = (now - epoch) % totalCycleMs
+          The modulo ensures the playlist loops infinitely.
+       d. Walk the playlist: accumulate each item's duration until the
+          cursor exceeds elapsedInCycle. That item is currently active.
+
+  Example:
+    Maths: A(5min), B(5min), C(5min) — total cycle = 15min
+    epoch = 12:00 PM, now = 12:22 PM
+    elapsed = 22min, elapsedInCycle = 22 % 15 = 7min
+    A owns 0–5min, B owns 5–10min → B is active at 7min ✓
+
+  5. Return { subject: activeContent } for each subject.
+     If nothing is active → return { message: "No content available" }
+
+
+6. DATABASE DESIGN DECISIONS
+------------------------------
+Tables:
+  User            → stores both principals and teachers (role enum)
+  Content         → core entity; holds file info, status, time window
+  ContentSlot     → one row per subject; groups content by channel
+  ContentSchedule → links content to slot; stores rotationOrder + duration
+
+Key decisions:
+  - ContentSchedule.contentId is @unique: one schedule entry per content
+    piece. This keeps the schedule clean and avoids duplicates.
+  - ContentSlot.subject is @unique: prevents duplicate channels per subject.
+  - rotationOrder is scoped per teacher+slot at query time (not a DB
+    constraint), to allow multiple teachers to have independent orderings
+    for the same subject.
+  - duration lives on ContentSchedule (not Content) to correctly model it
+    as a scheduling property, not a content property.
+
+
+7. FOLDER STRUCTURE
+--------------------
+src/
+  controllers/      Request/response handling; no business logic
+  routes/           Express routers; wires URLs to controllers + middleware
+  services/         All business logic (auth, content, approval, scheduling)
+  middlewares/      authMiddleware, roleMiddleware, upload (Multer), error
+  utils/            db.ts (Prisma client), jwt.ts, hash.ts
+
+
+8. MIDDLEWARE USAGE
+--------------------
+  authMiddleware     → verifies JWT, attaches user to req
+  roleMiddleware(r)  → checks req.user.role === r, else 403
+  upload (Multer)    → validates file type + size, saves to disk
+  express.json()     → parses JSON request bodies
+  cors()             → allows cross-origin requests
+
+
+9. SCALABILITY APPROACH
+------------------------
+Current implementation is single-node, suitable for the assignment scope.
+For production scale:
+
+  Caching:
+    - Cache GET /live/:teacherId responses in Redis with a short TTL
+      (e.g. 30 seconds). Invalidate on approval or rejection.
+    - This removes DB load from high-frequency student polling.
+
+  Rate Limiting:
+    - Apply express-rate-limit on the public /live endpoint to prevent abuse.
+
+  File Storage:
+    - Replace local /uploads with AWS S3 or similar object storage.
+    - Store only the S3 URL in Content.fileUrl.
+
+  Queue:
+    - Use a job queue (BullMQ + Redis) for file processing tasks
+      (virus scan, thumbnail generation) to avoid blocking the upload handler.
+
+  Database:
+    - Add indexes on Content(uploadedById, status, startTime, endTime)
+      for efficient live content queries.
+    - Connection pooling via PgBouncer for high concurrency.

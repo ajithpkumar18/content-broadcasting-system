@@ -1,0 +1,77 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PRINCIPAL
+  TEACHER
+}
+
+enum ContentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  role      Role
+  createdAt DateTime @default(now())
+
+  contents  Content[] @relation("TeacherContent")
+  approvals Content[] @relation("ApprovedBy")
+}
+
+model Content {
+  id              String        @id @default(uuid())
+  title           String
+  description     String?
+  subject         String
+  fileUrl         String
+  fileType        String
+  fileSize        Int
+  status          ContentStatus @default(PENDING)
+  rejectionReason String?
+  approvedAt      DateTime?
+  startTime       DateTime?
+  endTime         DateTime?
+  createdAt       DateTime      @default(now())
+
+  uploadedById String
+  uploadedBy   User   @relation("TeacherContent", fields: [uploadedById], references: [id])
+
+  approvedById String?
+  approvedBy   User?  @relation("ApprovedBy", fields: [approvedById], references: [id])
+
+  schedule ContentSchedule?
+}
+
+// One slot per subject — the "broadcast channel" for that subject
+model ContentSlot {
+  id        String   @id @default(uuid())
+  subject   String   @unique
+  createdAt DateTime @default(now())
+
+  schedules ContentSchedule[]
+}
+
+model ContentSchedule {
+  id            String   @id @default(uuid())
+  rotationOrder Int
+  duration      Int      @default(5) // minutes
+  createdAt     DateTime @default(now())
+
+  contentId String      @unique        // one schedule entry per content
+  content   Content     @relation(fields: [contentId], references: [id])
+
+  slotId    String
+  slot      ContentSlot @relation(fields: [slotId], references: [id])
+}
