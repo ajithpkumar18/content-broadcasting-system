@@ -6,6 +6,8 @@ import path from "path";
 import authRoutes from "./routes/auth.routes";
 import contentRoutes from "./routes/content.routes";
 import publicRoutes from "./routes/public.routes";
+import swaggerUi from "swagger-ui-express";
+import { swaggerSpec } from "./config/swagger";
 
 dotenv.config();
 
@@ -17,17 +19,18 @@ app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
 app.get("/", (req, res) => {
-  res.send("Content Broadcasting System API is running.");
+	res.send("Content Broadcasting System API is running.");
 });
 
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/content", contentRoutes);
 app.use("/api/public", publicRoutes); // GET /api/public/live/:teacherId
+app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+	console.log(`Server running on port ${PORT}`);
 });
 
 export default app;
